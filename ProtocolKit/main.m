@@ -21,7 +21,7 @@
 
 @end
 
-// Protocol Extentsion
+// Protocol Extension
 
 @defs(Forkable)
 
