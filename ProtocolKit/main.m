@@ -2,8 +2,8 @@
 //  main.m
 //  ProtocolKit
 //
-//  Created by sunnyxx on 15/7/24.
-//  Copyright (c) 2015年 forkingdog. All rights reserved.
+//  Created by sunnyxx.
+//  Copyright (c) 2015 forkingdog. All rights reserved.
 //
 
 #import <Foundation/Foundation.h>
