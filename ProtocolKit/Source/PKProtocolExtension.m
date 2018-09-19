@@ -20,8 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#import "PKProtocolExtension.h"
 #import <Foundation/Foundation.h>
+#import "PKProtocolExtension.h"
 #import <pthread.h>
 
 typedef struct {
@@ -37,7 +37,7 @@ static pthread_mutex_t protocolsLoadingLock = PTHREAD_MUTEX_INITIALIZER;
 static size_t extendedProtcolCount = 0, extendedProtcolCapacity = 0;
 
 Method *_pk_extension_create_merged(Method *existMethods, unsigned existMethodCount, Method *appendingMethods, unsigned appendingMethodCount) {
-
+    
     if (existMethodCount == 0) {
         return appendingMethods;
     }
@@ -49,7 +49,7 @@ Method *_pk_extension_create_merged(Method *existMethods, unsigned existMethodCo
 }
 
 void _pk_extension_merge(PKExtendedProtocol *extendedProtocol, Class containerClass) {
-
+    
     // Instance methods
     unsigned appendingInstanceMethodCount = 0;
     Method *appendingInstanceMethods = class_copyMethodList(containerClass, &appendingInstanceMethodCount);
@@ -60,7 +60,7 @@ void _pk_extension_merge(PKExtendedProtocol *extendedProtocol, Class containerCl
     free(extendedProtocol->instanceMethods);
     extendedProtocol->instanceMethods = mergedInstanceMethods;
     extendedProtocol->instanceMethodCount += appendingInstanceMethodCount;
-
+    
     // Class methods
     unsigned appendingClassMethodCount = 0;
     Method *appendingClassMethods = class_copyMethodList(object_getClass(containerClass), &appendingClassMethodCount);
@@ -74,9 +74,9 @@ void _pk_extension_merge(PKExtendedProtocol *extendedProtocol, Class containerCl
 }
 
 void _pk_extension_load(Protocol *protocol, Class containerClass) {
-
+    
     pthread_mutex_lock(&protocolsLoadingLock);
-
+    
     if (extendedProtcolCount >= extendedProtcolCapacity) {
         size_t newCapacity = 0;
         if (extendedProtcolCapacity == 0) {
@@ -87,7 +87,7 @@ void _pk_extension_load(Protocol *protocol, Class containerClass) {
         allExtendedProtocols = realloc(allExtendedProtocols, sizeof(*allExtendedProtocols) * newCapacity);
         extendedProtcolCapacity = newCapacity;
     }
-
+    
     size_t resultIndex = SIZE_T_MAX;
     for (size_t index = 0; index < extendedProtcolCount; ++index) {
         if (allExtendedProtocols[index].protocol == protocol) {
@@ -95,7 +95,7 @@ void _pk_extension_load(Protocol *protocol, Class containerClass) {
             break;
         }
     }
-
+    
     if (resultIndex == SIZE_T_MAX) {
         allExtendedProtocols[extendedProtcolCount] = (PKExtendedProtocol){
             .protocol = protocol,
@@ -107,39 +107,39 @@ void _pk_extension_load(Protocol *protocol, Class containerClass) {
         resultIndex = extendedProtcolCount;
         extendedProtcolCount++;
     }
-
+    
     _pk_extension_merge(&(allExtendedProtocols[resultIndex]), containerClass);
 
     pthread_mutex_unlock(&protocolsLoadingLock);
 }
 
 static void _pk_extension_inject_class(Class targetClass, PKExtendedProtocol extendedProtocol) {
-
+    
     for (unsigned methodIndex = 0; methodIndex < extendedProtocol.instanceMethodCount; ++methodIndex) {
         Method method = extendedProtocol.instanceMethods[methodIndex];
         SEL selector = method_getName(method);
-
+        
         if (class_getInstanceMethod(targetClass, selector)) {
             continue;
         }
-
+        
         IMP imp = method_getImplementation(method);
         const char *types = method_getTypeEncoding(method);
         class_addMethod(targetClass, selector, imp, types);
     }
-
+    
     Class targetMetaClass = object_getClass(targetClass);
     for (unsigned methodIndex = 0; methodIndex < extendedProtocol.classMethodCount; ++methodIndex) {
         Method method = extendedProtocol.classMethods[methodIndex];
         SEL selector = method_getName(method);
-
+        
         if (selector == @selector(load) || selector == @selector(initialize)) {
             continue;
         }
         if (class_getInstanceMethod(targetMetaClass, selector)) {
             continue;
         }
-
+        
         IMP imp = method_getImplementation(method);
         const char *types = method_getTypeEncoding(method);
         class_addMethod(targetMetaClass, selector, imp, types);
@@ -171,17 +171,17 @@ static void _pk_extension_try_inject_entry_class(Class class) {
     // 防止递归死锁，因为 class_getInstanceMethod(), 会触发 resolveInstanceMethod: 等方法的调用，就会导致递归调用，引起死锁
     // 这边没必要用 递归锁，内部 for 循环，才引起的递归。 代码不用重复执行
     NSMutableDictionary *threadDictionary = [NSThread currentThread].threadDictionary;
-    if ([threadDictionary objectForKey:@"IMYProtocolExtension"]) {
+    if ([threadDictionary objectForKey:@"_pk_injecting"]) {
         return;
     }
     pthread_mutex_lock(&protocolsLoadingLock);
-    [threadDictionary setObject:@1 forKey:@"IMYProtocolExtension"];
+    [threadDictionary setObject:@1 forKey:@"_pk_injecting"];
     _pk_extension_inject_entry_class(class);
-    [threadDictionary removeObjectForKey:@"IMYProtocolExtension"];
+    [threadDictionary removeObjectForKey:@"_pk_injecting"];
     pthread_mutex_unlock(&protocolsLoadingLock);
 }
 
-static BOOL imy_swizzleMethod(Class class, SEL origSel_, SEL altSel_) {
+static BOOL _pk_swizzleMethod(Class class, SEL origSel_, SEL altSel_) {
     Method origMethod = class_getInstanceMethod(class, origSel_);
     if (!origMethod) {
         return NO;
@@ -205,7 +205,7 @@ static BOOL imy_swizzleMethod(Class class, SEL origSel_, SEL altSel_) {
     return YES;
 }
 
-@implementation NSObject (IMYProtocolExtension)
+@implementation NSObject (PKExtendedProtocol)
 
 + (BOOL)_pk_resolveInstanceMethod:(SEL)sel {
     _pk_extension_try_inject_entry_class(self);
@@ -220,10 +220,6 @@ static BOOL imy_swizzleMethod(Class class, SEL origSel_, SEL altSel_) {
 @end
 
 __attribute__((constructor)) static void _pk_extension_inject_entry(void) {
-    imy_swizzleMethod(object_getClass([NSObject class]),
-                      @selector(resolveInstanceMethod:),
-                      @selector(_pk_resolveInstanceMethod:));
-    imy_swizzleMethod(object_getClass([NSObject class]),
-                      @selector(resolveClassMethod:),
-                      @selector(_pk_resolveClassMethod:));
+    _pk_swizzleMethod(object_getClass([NSObject class]), @selector(resolveInstanceMethod:), @selector(_pk_resolveInstanceMethod:));
+    _pk_swizzleMethod(object_getClass([NSObject class]), @selector(resolveClassMethod:), @selector(_pk_resolveClassMethod:));
 }
