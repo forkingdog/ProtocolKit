@@ -146,28 +146,80 @@ static void _pk_extension_inject_class(Class targetClass, PKExtendedProtocol ext
     }
 }
 
-__attribute__((constructor)) static void _pk_extension_inject_entry(void) {
-    
-    pthread_mutex_lock(&protocolsLoadingLock);
-
-    unsigned classCount = 0;
-    Class *allClasses = objc_copyClassList(&classCount);
-    
-    @autoreleasepool {
-        for (unsigned protocolIndex = 0; protocolIndex < extendedProtcolCount; ++protocolIndex) {
-            PKExtendedProtocol extendedProtcol = allExtendedProtocols[protocolIndex];
-            for (unsigned classIndex = 0; classIndex < classCount; ++classIndex) {
-                Class class = allClasses[classIndex];
-                if (!class_conformsToProtocol(class, extendedProtcol.protocol)) {
-                    continue;
-                }
-                _pk_extension_inject_class(class, extendedProtcol);
-            }
-        }
+static void _pk_extension_inject_entry_class(Class class) {
+    static NSMutableDictionary *injectedClassMap;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        injectedClassMap = [NSMutableDictionary dictionary];
+    });
+    NSString *className = NSStringFromClass(class);
+    // 所有 Class，只要注入一次即可，但是 resolveInstanceMethod： 会多次调用
+    if (injectedClassMap[className]) {
+        return;
     }
+    injectedClassMap[className] = @1;
+    for (unsigned protocolIndex = 0; protocolIndex < extendedProtcolCount; ++protocolIndex) {
+        PKExtendedProtocol extendedProtcol = allExtendedProtocols[protocolIndex];
+        if (![class conformsToProtocol:extendedProtcol.protocol]) {
+            continue;
+        }
+        _pk_extension_inject_class(class, extendedProtcol);
+    }
+}
+
+static void _pk_extension_try_inject_entry_class(Class class) {
+    // 防止递归死锁，因为 class_getInstanceMethod(), 会触发 resolveInstanceMethod: 等方法的调用，就会导致递归调用，引起死锁
+    // 这边没必要用 递归锁，内部 for 循环，才引起的递归。 代码不用重复执行
+    NSMutableDictionary *threadDictionary = [NSThread currentThread].threadDictionary;
+    if ([threadDictionary objectForKey:@"_pk_injecting"]) {
+        return;
+    }
+    pthread_mutex_lock(&protocolsLoadingLock);
+    [threadDictionary setObject:@1 forKey:@"_pk_injecting"];
+    _pk_extension_inject_entry_class(class);
+    [threadDictionary removeObjectForKey:@"_pk_injecting"];
     pthread_mutex_unlock(&protocolsLoadingLock);
-    
-    free(allClasses);
-    free(allExtendedProtocols);
-    extendedProtcolCount = 0, extendedProtcolCapacity = 0;
+}
+
+static BOOL _pk_swizzleMethod(Class class, SEL origSel_, SEL altSel_) {
+    Method origMethod = class_getInstanceMethod(class, origSel_);
+    if (!origMethod) {
+        return NO;
+    }
+    Method altMethod = class_getInstanceMethod(class, altSel_);
+    if (!altMethod) {
+        return NO;
+    }
+
+    class_addMethod(class,
+                    origSel_,
+                    class_getMethodImplementation(class, origSel_),
+                    method_getTypeEncoding(origMethod));
+    class_addMethod(class,
+                    altSel_,
+                    class_getMethodImplementation(class, altSel_),
+                    method_getTypeEncoding(altMethod));
+
+    method_exchangeImplementations(class_getInstanceMethod(class, origSel_), class_getInstanceMethod(class, altSel_));
+
+    return YES;
+}
+
+@implementation NSObject (PKExtendedProtocol)
+
++ (BOOL)_pk_resolveInstanceMethod:(SEL)sel {
+    _pk_extension_try_inject_entry_class(self);
+    return [self _pk_resolveInstanceMethod:sel];
+}
+
++ (BOOL)_pk_resolveClassMethod:(SEL)sel {
+    _pk_extension_try_inject_entry_class(self);
+    return [self _pk_resolveClassMethod:sel];
+}
+
+@end
+
+__attribute__((constructor)) static void _pk_extension_inject_entry(void) {
+    _pk_swizzleMethod(object_getClass([NSObject class]), @selector(resolveInstanceMethod:), @selector(_pk_resolveInstanceMethod:));
+    _pk_swizzleMethod(object_getClass([NSObject class]), @selector(resolveClassMethod:), @selector(_pk_resolveClassMethod:));
 }
